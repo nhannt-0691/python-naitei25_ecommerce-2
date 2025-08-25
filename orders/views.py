@@ -7,13 +7,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny
 from django.utils.translation import gettext as _
 
 from cart.models import Cart
 from cart.views import calculate_cart_total
-from .models import Order, OrderItem, Coupon
-from .serializers import OrderSerializer, CouponApplySerializer, CouponSerializer
+from .models import Order, OrderItem, Coupon, FlashSale
+from .serializers import OrderSerializer, CouponApplySerializer, CouponSerializer, FlashSaleSerializer, FlashSaleListSerializer, ActiveFlashSaleSerializer, ProductInstantSerializer
 from core.constants import OrderStatus, CancelReason
+from django.utils import timezone
+from products.models import Product
 
 
 class OrderListCreateAPIView(generics.ListCreateAPIView):
@@ -214,3 +217,66 @@ class AdminOrderDetailAPIView(generics.RetrieveUpdateAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+class AdminFlashSaleListCreateAPIView(generics.ListCreateAPIView):
+    """Admin view to list and create flash sales"""
+    serializer_class = FlashSaleSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = FlashSale.objects.all().order_by('-created_at')
+
+class AdminFlashSaleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    """Admin view to manage individual flash sales"""
+    serializer_class = FlashSaleSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = FlashSale.objects.all()
+
+class ActiveFlashSaleListAPIView(generics.ListAPIView):
+    """Public view to get active flash sales"""
+    serializer_class = ActiveFlashSaleSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        now = timezone.now()
+        return FlashSale.objects.filter(
+            is_active=True,
+            start_date__lte=now,
+            end_date__gte=now
+        ).order_by('-created_at')
+
+class FlashSaleProductListAPIView(generics.ListAPIView):
+    """Get products from a specific flash sale"""
+    serializer_class = ProductInstantSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        flash_sale_id = self.kwargs['pk']
+        try:
+            flash_sale = FlashSale.objects.get(id=flash_sale_id)
+            return flash_sale.products.filter(is_in_stock=True)
+        except FlashSale.DoesNotExist:
+            return Product.objects.none()
+
+    def list(self, request, *args, **kwargs):
+        try:
+            flash_sale = FlashSale.objects.get(id=self.kwargs['pk'])
+            products = self.get_queryset()
+            serializer = self.get_serializer(products, many=True)
+            
+            return Response({
+                'flash_sale': {
+                    'id': flash_sale.id,
+                    'name': flash_sale.name,
+                    'discount_percent': float(flash_sale.discount_percent),
+                    'start_date': flash_sale.start_date,
+                    'end_date': flash_sale.end_date,
+                    'remaining_time': flash_sale.get_remaining_time().total_seconds() if flash_sale.get_remaining_time() else 0
+                },
+                'products': serializer.data
+            })
+        except FlashSale.DoesNotExist:
+            return Response(
+                {'detail': _('Flash sale not found')},
+                status=status.HTTP_404_NOT_FOUND
+            )
